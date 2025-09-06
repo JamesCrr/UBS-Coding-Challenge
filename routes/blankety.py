@@ -15,32 +15,42 @@ from routes import app
 # -----------------------------
 
 def _fit_poly(idx, vals, max_deg=2):
-    """Fit degree 1 or 2 polynomial safely with rescaling"""
-    # Rescale x to [-1,1]
-    x = np.linspace(-1, 1, len(idx))
-    scale = (idx[-1] - idx[0])
-    if scale == 0:
-        return np.polyfit(idx, vals, 1)  # fallback
-    x_scaled = (idx - idx.min()) / scale * 2 - 1
+    """Fit degree 1 or 2 polynomial safely with normalization."""
+    if len(idx) < 5:
+        # too few points, fallback
+        return np.polyfit(idx, vals, 1), 1
+
+    # normalize x to [-1,1]
+    x_min, x_max = idx.min(), idx.max()
+    x_scaled = (idx - x_min) / (x_max - x_min) * 2 - 1
+
+    # normalize y to mean ~0, std ~1
+    y_mean, y_std = np.mean(vals), np.std(vals) or 1.0
+    y_scaled = (vals - y_mean) / y_std
 
     best_deg, best_err, best_coefs = 1, float("inf"), None
-    for deg in range(1, max_deg+1):
+    for deg in range(1, max_deg + 1):
         try:
-            coefs = np.polyfit(x_scaled, vals, deg)
+            coefs = np.polyfit(x_scaled, y_scaled, deg)
             pred = np.polyval(coefs, x_scaled)
-            err = np.nanmean((pred - vals) ** 2)
+            # safer metric: MAE instead of MSE
+            err = np.nanmean(np.abs(pred - y_scaled))
             if err < best_err:
                 best_err = err
                 best_deg = deg
                 best_coefs = coefs
         except Exception:
             continue
-    return best_coefs, best_deg, idx.min(), scale
 
-def _poly_predict(n, coefs, deg, x_min, scale):
-    x_full = (np.arange(n) - x_min) / scale * 2 - 1
-    return np.polyval(coefs, x_full)
+    # return normalized fit info
+    return (best_coefs, best_deg, x_min, x_max, y_mean, y_std)
 
+
+def _poly_predict(n, fit_info):
+    coefs, deg, x_min, x_max, y_mean, y_std = fit_info
+    x_full = (np.arange(n) - x_min) / (x_max - x_min) * 2 - 1
+    y_pred = np.polyval(coefs, x_full)
+    return y_pred * y_std + y_mean
 
 
 def _linear_fill_with_edge_extrapolation(x: np.ndarray) -> np.ndarray:
@@ -163,8 +173,12 @@ def impute_one(series_list: List[float]) -> List[float]:
         coefs = np.polyfit(idx, vals, 1)
 
     # trend = np.polyval(coefs, np.arange(n))
-    coefs, deg, xmin, scale = _fit_poly(idx, vals, max_deg=2)
-    trend = _poly_predict(n, coefs, deg, xmin, scale)
+
+    # coefs, deg, xmin, scale = _fit_poly(idx, vals, max_deg=2)
+    # trend = _poly_predict(n, coefs, deg, xmin, scale)
+
+    fit_info = _fit_poly(idx, vals, max_deg=2)
+    trend = _poly_predict(n, fit_info)
 
     # Step 3: residuals
     residuals = arr - trend
