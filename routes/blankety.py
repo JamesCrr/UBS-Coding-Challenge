@@ -144,7 +144,7 @@ def blankety():
     ok, msg = validate_payload(payload)
     if not ok:
         return jsonify({"error": msg}), 400
-
+    print("msg:", msg)
     series: List[List[float]] = payload["series"]
     answer = [impute_one(s) for s in series]
 

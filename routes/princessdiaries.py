@@ -15,6 +15,7 @@ def princessdiaries():
         tasks = data['tasks']
         subway = data['subway']
         starting_station = data['starting_station']
+        print("data:", data)
         
         # Extract all unique stations
         stations = set([starting_station])
