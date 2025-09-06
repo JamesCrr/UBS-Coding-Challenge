@@ -1,18 +1,20 @@
+
 from __future__ import annotations
 from typing import List, Tuple
 from flask import Flask, request, jsonify
 import numpy as np
-import math
+from scipy.signal import savgol_filter
+from numpy.linalg import LinAlgError
 
 from flask import request
 from routes import app
 
+# -----------------------------
+# Imputation utilities
+# -----------------------------
+
 def _linear_fill_with_edge_extrapolation(x: np.ndarray) -> np.ndarray:
-    """
-    Fill NaNs by linear interpolation on observed points.
-    Extrapolates linearly at the edges using the first/last two observed points.
-    If fewer than 2 observed points exist, falls back to constant fill (single observed value or zeros).
-    """
+    """Linear interpolate + edge linear extrapolation"""
     n = x.size
     y = x.copy()
     isnan = np.isnan(y)
@@ -22,231 +24,128 @@ def _linear_fill_with_edge_extrapolation(x: np.ndarray) -> np.ndarray:
     idx = np.where(~isnan)[0]
     vals = y[idx]
 
-    # If only one observed value: constant fill
     if idx.size == 1:
         y[:] = vals[0]
         return y
 
-    # Build full set of x positions
     pos = np.arange(n)
-
-    # Internal interpolation
     y[isnan] = np.interp(pos[isnan], idx, vals)
 
-    # For completeness, np.interp already handles edge extrapolation
-    # by using the first/last observed values, which is constant extrapolation.
-    # Upgrade to linear edge extrapolation when possible:
-    first_obs, second_obs = idx[0], idx[1]
-    last_obs, penult_obs = idx[-1], idx[-2]
-
-    # Left edge linear extrapolation (if gap before first_obs)
-    if first_obs > 0:
-        slope_left = (y[second_obs] - y[first_obs]) / (second_obs - first_obs)
-        for k in range(first_obs - 1, -1, -1):
-            y[k] = y[k + 1] - slope_left
-
-    # Right edge linear extrapolation (if gap after last_obs)
-    if last_obs < n - 1:
-        slope_right = (y[last_obs] - y[penult_obs]) / (last_obs - penult_obs)
-        for k in range(last_obs + 1, n):
-            y[k] = y[k - 1] + slope_right
+    # Linear edge extrapolation
+    if idx[0] > 0:
+        slope = (vals[1] - vals[0]) / (idx[1] - idx[0])
+        for k in range(idx[0] - 1, -1, -1):
+            y[k] = y[k + 1] - slope
+    if idx[-1] < n - 1:
+        slope = (vals[-1] - vals[-2]) / (idx[-1] - idx[-2])
+        for k in range(idx[-1] + 1, n):
+            y[k] = y[k - 1] + slope
 
     return y
 
 
-def _moving_average(signal: np.ndarray, window: int) -> np.ndarray:
-    """
-    Two-sided moving average with reflective padding.
-    """
-    if window <= 1:
-        return signal.copy()
-    w = int(window)
-    pad = w // 2
-    # Reflective padding to avoid edge shrink
-    padded = np.pad(signal, (pad, pad), mode="reflect")
-    kernel = np.ones(w, dtype=float) / w
-    smoothed = np.convolve(padded, kernel, mode="valid")
-    return smoothed
+def _savgol_smooth(arr: np.ndarray, window: int = 51, poly: int = 3) -> np.ndarray:
+    """Savitzky–Golay smoothing with edge handling"""
+    if window >= len(arr):
+        window = len(arr) - (1 - len(arr) % 2)  # force odd < len
+    if window < 5:
+        return arr
+    return savgol_filter(arr, window_length=window, polyorder=poly, mode="mirror")
 
 
-def _adaptive_blend(original: np.ndarray,
-                    smoothed: np.ndarray,
-                    miss_mask: np.ndarray,
-                    w_missing: float = 0.7,
-                    w_observed: float = 0.2) -> np.ndarray:
-    """
-    Blend original and smoothed values with stronger smoothing on originally-missing indices.
-    """
-    w = np.where(miss_mask, w_missing, w_observed)
-    return (1.0 - w) * original + w * smoothed
+def _yule_walker_estimate(x: np.ndarray, order: int = 3) -> np.ndarray:
+    """Estimate AR coefficients via Yule–Walker"""
+    x = x - np.mean(x)
+    r = np.correlate(x, x, mode="full")[len(x)-1:]
+    R = np.array([r[i:i+order] for i in range(order)])
+    rhs = r[1:order+1]
+    try:
+        phi = np.linalg.solve(R, rhs)
+    except LinAlgError:
+        phi = np.zeros(order)
+    return phi
 
 
-def _local_poly_refine(series: np.ndarray,
-                       miss_mask: np.ndarray,
-                       max_neighbors: int = 30) -> np.ndarray:
-    """
-    For each contiguous run of missing values, fit a local quadratic polynomial
-    to up to 'max_neighbors' observed points on each side and refine estimates.
-    Uses simple ridge (L2) regularization to ensure stability.
-    """
-    y = series.copy()
-    n = y.size
-    i = 0
-
-    while i < n:
-        if not miss_mask[i]:
-            i += 1
+def _ar_predict(arr: np.ndarray, idx_missing: np.ndarray, order: int = 3, neigh: int = 50) -> np.ndarray:
+    """Predict missing points using AR model fitted on neighbors"""
+    y = arr.copy()
+    n = len(arr)
+    for i in idx_missing:
+        left = max(0, i - neigh)
+        right = min(n, i + neigh)
+        segment = np.delete(y[left:right], np.where(np.isnan(y[left:right])))
+        if len(segment) < order + 1:
             continue
-
-        # Identify contiguous missing block [i, j)
-        j = i
-        while j < n and miss_mask[j]:
-            j += 1
-
-        # Gather neighborhood indices
-        left_idx = np.arange(max(i - max_neighbors, 0), i)
-        right_idx = np.arange(j, min(j + max_neighbors, n))
-        nb_idx = np.concatenate([left_idx, right_idx])
-
-        # If no neighbors, skip (shouldn't happen after first-stage fill)
-        if nb_idx.size == 0:
-            i = j
+        phi = _yule_walker_estimate(segment, order=order)
+        # AR prediction using last known points
+        history = []
+        for k in range(order):
+            pos = i - (k + 1)
+            if pos >= 0:
+                history.append(y[pos])
+        if len(history) < order:
             continue
-
-        x_nb = nb_idx.astype(float)
-        y_nb = y[nb_idx].astype(float)
-
-        # Center x to improve conditioning
-        x0 = (i + j - 1) / 2.0
-        x_c = x_nb - x0
-
-        # Design matrix for quadratic: [1, x, x^2]
-        X = np.column_stack([np.ones_like(x_c), x_c, x_c**2])
-
-        # Ridge regularization
-        lam = 1e-3
-        XtX = X.T @ X + lam * np.eye(3)
-        Xty = X.T @ y_nb
-        try:
-            beta = np.linalg.solve(XtX, Xty)
-        except np.linalg.LinAlgError:
-            beta = np.linalg.lstsq(X, y_nb, rcond=None)[0]
-
-        # Predict for the missing block
-        miss_idx = np.arange(i, j)
-        x_m = miss_idx.astype(float) - x0
-        X_m = np.column_stack([np.ones_like(x_m), x_m, x_m**2])
-        y_hat = X_m @ beta
-
-        # Blend with current estimate for stability
-        y[miss_idx] = 0.5 * y[miss_idx] + 0.5 * y_hat
-
-        i = j
-
+        pred = np.dot(phi, history[::-1])
+        y[i] = pred
     return y
 
 
 def _clip_outliers_like(signal: np.ndarray, ref: np.ndarray) -> np.ndarray:
-    """
-    Clip 'signal' to a sane range derived from 'ref' distribution (1st..99th percentiles, extended by 3*IQR).
-    Guards against extreme excursions after extrapolation.
-    """
+    """Clamp values based on distribution of reference"""
     finite_ref = ref[np.isfinite(ref)]
     if finite_ref.size == 0:
-        return np.nan_to_num(signal, nan=0.0, posinf=1e6, neginf=-1e6)
-
+        return np.nan_to_num(signal)
     p1, p99 = np.percentile(finite_ref, [1, 99])
     q1, q3 = np.percentile(finite_ref, [25, 75])
     iqr = q3 - q1
     lo = p1 - 3.0 * iqr
     hi = p99 + 3.0 * iqr
     clipped = np.clip(signal, lo, hi)
-    return np.nan_to_num(clipped, nan=0.0, posinf=hi, neginf=lo)
+    return np.nan_to_num(clipped)
 
 
 def impute_one(series_list: List[float]) -> List[float]:
-    """
-    Impute a single 1D series (length 1000) with possible nulls.
-    Returns a Python list of floats (no NaNs/Infs).
-    """
-    # Convert None -> NaN
     arr = np.array([np.nan if (v is None) else float(v) for v in series_list], dtype=float)
-    original_missing = np.isnan(arr)
+    mask = np.isnan(arr)
 
-    # Step 1: Linear interpolation + edge linear extrapolation
-    filled = _linear_fill_with_edge_extrapolation(arr)
+    # Step 1: Linear fill
+    base = _linear_fill_with_edge_extrapolation(arr)
 
-    # Step 2: Gentle denoising with adaptive smoothing
-    n = filled.size
-    # Window ~ 2%–5% of length: choose odd number
-    win = int(max(5, min(51, (n // 20) | 1)))  # ensure odd-ish, but even is fine for average
-    smoothed = _moving_average(filled, win)
-    blended = _adaptive_blend(filled, smoothed, original_missing, w_missing=0.7, w_observed=0.2)
+    # Step 2: Savitzky–Golay smoothing
+    smooth = _savgol_smooth(base, window=51, poly=3)
 
-    # Step 3: Local quadratic refinement on missing runs
-    refined = _local_poly_refine(blended, original_missing, max_neighbors=30)
+    # Step 3: AR refinement
+    ar_filled = _ar_predict(base.copy(), np.where(mask)[0], order=3, neigh=50)
 
-    # Step 4: Final light smoothing pass on only the imputed points (preserve observed)
-    smoothed2 = _moving_average(refined, window=max(5, win))
-    refined = np.where(original_missing,
-                       0.5 * refined + 0.5 * smoothed2,
-                       refined)
+    # Step 4: Blend
+    blended = np.where(mask, 0.6 * ar_filled + 0.4 * smooth, base)
 
-    # Step 5: Safety clamps
-    refined = _clip_outliers_like(refined, ref=filled)
+    # Step 5: Clamp outliers
+    final = _clip_outliers_like(blended, base)
 
-    # Ensure finite numeric output
-    refined = np.nan_to_num(refined, nan=0.0, posinf=np.finfo(float).max/2, neginf=-np.finfo(float).max/2)
-
-    return refined.tolist()
+    return final.tolist()
 
 
 def validate_payload(payload) -> Tuple[bool, str]:
-    if not isinstance(payload, dict):
-        return False, "Payload must be a JSON object"
-    if "series" not in payload:
+    if not isinstance(payload, dict) or "series" not in payload:
         return False, "Missing 'series' key"
     series = payload["series"]
     if not isinstance(series, list) or len(series) != 100:
         return False, "Expected 'series' to be a list of exactly 100 lists"
-    for idx, row in enumerate(series):
+    for row in series:
         if not isinstance(row, list) or len(row) != 1000:
-            return False, f"Each inner list must have exactly 1000 elements (problem at index {idx})"
-        # Basic type check: allow float, int, or None
-        for j, v in enumerate(row):
-            if v is None:
-                continue
-            if not isinstance(v, (int, float)):
-                return False, f"Element at series[{idx}][{j}] must be float, int, or null"
+            return False, "Each list must have exactly 1000 elements"
     return True, ""
 
 
 @app.route('/blankety', methods=['POST'])
 def blankety():
-    try:
-        payload = request.get_json(force=True, silent=False)
-    except Exception:
-        return jsonify({"error": "Invalid or missing JSON"}), 400
-
+    payload = request.get_json(force=True, silent=False)
     ok, msg = validate_payload(payload)
     if not ok:
         return jsonify({"error": msg}), 400
 
     series: List[List[float]] = payload["series"]
-
-    # Impute each list
-    try:
-        answer = [impute_one(s) for s in series]
-    except Exception as e:
-        return jsonify({"error": f"Imputation failed: {str(e)}"}), 500
-
-    # Final shape & numeric checks
-    if len(answer) != 100 or any(len(row) != 1000 for row in answer):
-        return jsonify({"error": "Output shape mismatch"}), 500
-    # Ensure numeric-only (no NaNs/Infs)
-    for i, row in enumerate(answer):
-        arr = np.array(row, dtype=float)
-        if not np.all(np.isfinite(arr)):
-            return jsonify({"error": f"Non-finite values produced in series {i}"}), 500
+    answer = [impute_one(s) for s in series]
 
     return jsonify({"answer": answer}), 200

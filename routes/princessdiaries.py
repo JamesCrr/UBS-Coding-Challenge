@@ -7,7 +7,7 @@ import math
 from flask import request
 from routes import app
 
-@app.route('/princessdiaries', methods=['POST'])
+@app.route('/princess-diaries', methods=['POST'])
 def princessdiaries():
     try:
         data = request.get_json()
