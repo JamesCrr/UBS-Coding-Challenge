@@ -7,6 +7,8 @@ import logging
 from flask import request
 from routes import app
 
+cc = 0
+
 @app.route('/princess-diaries', methods=['POST'])
 def princessdiaries():
     try:
@@ -16,6 +18,10 @@ def princessdiaries():
         subway = data['subway']
         starting_station = data['starting_station']
         
+        # logging.info("data: {}".format(data))
+        print(f"case{cc} data: {data}")
+        cc += 1
+
         # Extract all unique stations
         stations = set([starting_station])
         for task in tasks:
