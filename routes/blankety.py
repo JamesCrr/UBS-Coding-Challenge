@@ -147,6 +147,7 @@ def blankety():
         return jsonify({"error": msg}), 400
     series: List[List[float]] = payload["series"]
     logging.info("data sent for evaluation {}".format(payload))
+    print("payload:", payload)
     answer = [impute_one(s) for s in series]
 
     return jsonify({"answer": answer}), 200
