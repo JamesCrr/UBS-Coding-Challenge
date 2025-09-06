@@ -20,7 +20,7 @@ def princessdiaries():
         
         # logging.info("data: {}".format(data))
         # print(f"case{cc} data: {data}")
-        logging.info("case%s data: %s", cc, data)
+        logging.info("case{} data: {}".format(cc, data))
         cc += 1
 
         # Extract all unique stations
