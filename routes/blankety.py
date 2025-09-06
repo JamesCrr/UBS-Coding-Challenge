@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Tuple
 from flask import Flask, request, jsonify
 import numpy as np
+import logging
 from scipy.signal import savgol_filter
 from numpy.linalg import LinAlgError
 
@@ -144,7 +145,7 @@ def blankety():
     ok, msg = validate_payload(payload)
     if not ok:
         return jsonify({"error": msg}), 400
-    print("msg:", msg)
+    logging.info("data sent for evaluation {}".format(data))
     series: List[List[float]] = payload["series"]
     answer = [impute_one(s) for s in series]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Tuple
 from flask import Flask, request, jsonify
 import numpy as np
-import math
+import logging
 
 from flask import request
 from routes import app
@@ -11,11 +11,10 @@ from routes import app
 def princessdiaries():
     try:
         data = request.get_json()
-        
+        logging.info("data sent for evaluation {}".format(data))
         tasks = data['tasks']
         subway = data['subway']
         starting_station = data['starting_station']
-        print("data:", data)
         
         # Extract all unique stations
         stations = set([starting_station])
