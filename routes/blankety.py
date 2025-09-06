@@ -108,23 +108,44 @@ def _clip_outliers_like(signal: np.ndarray, ref: np.ndarray) -> np.ndarray:
 def impute_one(series_list: List[float]) -> List[float]:
     arr = np.array([np.nan if (v is None) else float(v) for v in series_list], dtype=float)
     mask = np.isnan(arr)
+    n = len(arr)
 
-    # Step 1: Linear fill
+    # Step 1: baseline linear interpolation
     base = _linear_fill_with_edge_extrapolation(arr)
 
-    # Step 2: Savitzky–Golay smoothing
-    smooth = _savgol_smooth(base, window=51, poly=3)
+    # Step 2: fit global polynomial (deg 1 or 2)
+    idx = np.where(~mask)[0]
+    vals = arr[idx]
+    deg = 1
+    if len(idx) > 20:  # enough points
+        # test if quadratic improves fit
+        lin_coefs = np.polyfit(idx, vals, 1)
+        quad_coefs = np.polyfit(idx, vals, 2)
+        lin_pred = np.polyval(lin_coefs, idx)
+        quad_pred = np.polyval(quad_coefs, idx)
+        lin_err = np.mean((lin_pred - vals) ** 2)
+        quad_err = np.mean((quad_pred - vals) ** 2)
+        if quad_err < 0.95 * lin_err:
+            deg = 2
+            coefs = quad_coefs
+        else:
+            coefs = lin_coefs
+    else:
+        coefs = np.polyfit(idx, vals, 1)
 
-    # Step 3: AR refinement
-    ar_filled = _ar_predict(base.copy(), np.where(mask)[0], order=3, neigh=50)
+    trend = np.polyval(coefs, np.arange(n))
 
-    # Step 4: Blend
-    blended = np.where(mask, 0.6 * ar_filled + 0.4 * smooth, base)
+    # Step 3: residuals
+    residuals = arr - trend
+    residuals[mask] = np.nan
+    residuals_filled = _linear_fill_with_edge_extrapolation(residuals)
+    residuals_smooth = _savgol_smooth(residuals_filled, window=31, poly=2)
 
-    # Step 5: Clamp outliers
-    final = _clip_outliers_like(blended, base)
+    # Step 4: combine
+    imputed = trend + residuals_smooth
+    imputed = _clip_outliers_like(imputed, base)
 
-    return final.tolist()
+    return imputed.tolist()
 
 
 def validate_payload(payload) -> Tuple[bool, str]:
