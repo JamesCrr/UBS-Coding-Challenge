@@ -19,7 +19,8 @@ def princessdiaries():
         starting_station = data['starting_station']
         
         # logging.info("data: {}".format(data))
-        print(f"case{cc} data: {data}")
+        # print(f"case{cc} data: {data}")
+        logging.info("case%s data: %s", cc, data)
         cc += 1
 
         # Extract all unique stations
