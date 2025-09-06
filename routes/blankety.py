@@ -14,6 +14,35 @@ from routes import app
 # Imputation utilities
 # -----------------------------
 
+def _fit_poly(idx, vals, max_deg=2):
+    """Fit degree 1 or 2 polynomial safely with rescaling"""
+    # Rescale x to [-1,1]
+    x = np.linspace(-1, 1, len(idx))
+    scale = (idx[-1] - idx[0])
+    if scale == 0:
+        return np.polyfit(idx, vals, 1)  # fallback
+    x_scaled = (idx - idx.min()) / scale * 2 - 1
+
+    best_deg, best_err, best_coefs = 1, float("inf"), None
+    for deg in range(1, max_deg+1):
+        try:
+            coefs = np.polyfit(x_scaled, vals, deg)
+            pred = np.polyval(coefs, x_scaled)
+            err = np.nanmean((pred - vals) ** 2)
+            if err < best_err:
+                best_err = err
+                best_deg = deg
+                best_coefs = coefs
+        except Exception:
+            continue
+    return best_coefs, best_deg, idx.min(), scale
+
+def _poly_predict(n, coefs, deg, x_min, scale):
+    x_full = (np.arange(n) - x_min) / scale * 2 - 1
+    return np.polyval(coefs, x_full)
+
+
+
 def _linear_fill_with_edge_extrapolation(x: np.ndarray) -> np.ndarray:
     """Linear interpolate + edge linear extrapolation"""
     n = x.size
@@ -133,7 +162,9 @@ def impute_one(series_list: List[float]) -> List[float]:
     else:
         coefs = np.polyfit(idx, vals, 1)
 
-    trend = np.polyval(coefs, np.arange(n))
+    # trend = np.polyval(coefs, np.arange(n))
+    coefs, deg, xmin, scale = _fit_poly(idx, vals, max_deg=2)
+    trend = _poly_predict(n, coefs, deg, xmin, scale)
 
     # Step 3: residuals
     residuals = arr - trend
