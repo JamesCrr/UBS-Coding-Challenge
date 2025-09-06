@@ -8,6 +8,6 @@ from flask import request
 from routes import app
 
 
-@app.route('/', methods=['GET'])
-def default_route():
+@app.route('/princessdiaries', methods=['POTS'])
+def princessdiaries():
     return 'Python Template'
